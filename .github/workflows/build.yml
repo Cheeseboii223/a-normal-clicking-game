@@ -1,4 +1,4 @@
-name: Build Kivy APK
+name: A Normal Clicking Game
 
 on:
   push:
@@ -29,9 +29,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install Cython==0.29.33 buildozer
 
-      - name: Build APK
+      - name: Build APK (Auto-Find Folder)
         run: |
+          # 1. Find the exact folder containing your buildozer.spec
+          PROJECT_DIR=$(dirname $(find . -name buildozer.spec | head -n 1))
+          echo "Found game files hiding in: $PROJECT_DIR"
+          
+          # 2. Go into that folder and run Buildozer
+          cd "$PROJECT_DIR"
           buildozer -v android debug
+          
+          # 3. Move the resulting APK back to the main workspace root
+          cd $GITHUB_WORKSPACE
+          mkdir -p bin
+          cp "$PROJECT_DIR/bin/"*.apk ./bin/
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
