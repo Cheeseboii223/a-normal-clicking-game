@@ -1,4 +1,4 @@
-name: A Normal Clicking Game
+name: Build Kivy APK
 
 on:
   push:
@@ -35,9 +35,9 @@ jobs:
           PROJECT_DIR=$(dirname $(find . -name buildozer.spec | head -n 1))
           echo "Found game files hiding in: $PROJECT_DIR"
           
-          # 2. Go into that folder and run Buildozer
+          # 2. Go into that folder and run Buildozer, automatically saying YES to all licenses
           cd "$PROJECT_DIR"
-          buildozer -v android debug
+          yes | buildozer -v android debug
           
           # 3. Move the resulting APK back to the main workspace root
           cd $GITHUB_WORKSPACE
