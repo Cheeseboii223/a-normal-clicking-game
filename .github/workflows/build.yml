@@ -1,4 +1,4 @@
-name: Build Kivy APK
+name: A Normal Clicking Game
 
 on:
   push:
