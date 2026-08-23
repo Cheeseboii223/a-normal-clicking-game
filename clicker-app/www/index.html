@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>a normal clicker game</title>
+<link rel="icon" href="assets/icon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+  <!-- INTRO / LOADING SCREEN -->
+  <div id="intro-screen" class="screen">
+    <h1 id="intro-title" class="intro-title">a normal clicker game</h1>
+    <p id="intro-loading-label" class="intro-loading-label">loading...</p>
+    <div class="loading-track">
+      <div id="loading-fill" class="loading-fill"></div>
+    </div>
+  </div>
+
+  <!-- MAIN GAME SCREEN -->
+  <div id="game-screen" class="screen hidden">
+
+    <div class="top-bar">
+      <button id="settings-btn" class="icon-btn" aria-label="Settings">⚙</button>
+    </div>
+
+    <div class="hud">
+      <div id="click-label" class="click-label">clicks : 0</div>
+      <button id="rank-badge" class="rank-badge">Bronze I</button>
+    </div>
+
+    <div class="click-wrap">
+      <div class="click-glow"></div>
+      <button id="click-button" class="click-button">CLICK ME</button>
+    </div>
+
+    <div id="toast-root" class="toast-root"></div>
+
+    <div class="bottom-bar">
+      <button id="milestone-btn" class="pill-btn">MILESTONE</button>
+      <button id="server-btn" class="pill-btn pill-btn-accent">SERVER</button>
+      <button id="upgrades-btn" class="pill-btn">UPGRADES</button>
+    </div>
+
+  </div>
+
+  <!-- OVERLAYS: hacked event + hack battle -->
+  <div id="hacked-overlay" class="fullscreen-overlay hidden">
+    <div class="hacked-red"></div>
+    <div id="hacked-text" class="hacked-text"></div>
+  </div>
+
+  <div id="battle-overlay" class="fullscreen-overlay hidden">
+    <button id="battle-tap-target" class="battle-tap-target" aria-label="Fight back"></button>
+    <div class="battle-banner">
+      <div class="battle-title">HACKER ATTACK</div>
+      <div id="battle-target" class="battle-target">CLICK 0 MORE<br/>TO FIGHT BACK</div>
+      <div id="battle-status" class="battle-status">Hackers are stealing your clicks...</div>
+    </div>
+  </div>
+
+  <!-- Generic modal root (settings / milestones / upgrades / server / rank / guide / credits / confirm) -->
+  <div id="modal-root" class="modal-root hidden">
+    <div id="modal-backdrop" class="modal-backdrop"></div>
+    <div id="modal-box" class="modal-box"></div>
+  </div>
+
+  <!-- background music -->
+  <audio id="bg-audio" preload="auto"></audio>
+
+  <script src="js/data.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

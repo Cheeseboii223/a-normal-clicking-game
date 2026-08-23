@@ -1,0 +1,12 @@
+{
+  "appId": "com.iwodv.anormalclickinggame",
+  "appName": "a normal clicker game",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": false
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}
