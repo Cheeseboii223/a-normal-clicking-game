@@ -88,6 +88,42 @@ from the terminal with `./gradlew assembleRelease`, but that requires wiring
 up signing config in `android/app/build.gradle` first, which is easiest to
 do once through the Android Studio wizard.
 
+## Polish pass (this update)
+
+- **Upgrades no longer step on each other.** In the previous build several
+  upgrades quietly added into the *same* shared counter (e.g. Auto Click,
+  PSU Boost, and Network all pushed into one `auto_click_rate` number), so
+  buying one could make another upgrade's effect look like it "vanished."
+  Every upgrade now owns exactly one effect, shown live under its name in
+  the shop. The single exception is **Core Overclock**, which is openly a
+  global +1%/level multiplier on top of everything else — that's by design
+  and is labelled as such, not a bug.
+- **Upgrades shop stays open while you buy.** It used to close after every
+  purchase; now it updates in place with a flash animation on success (or a
+  shake if you can't afford it yet), plus a small live summary of your
+  current Click Power / Auto Clicker / Global Boost at the top.
+- **Hacked events are now scheduled, not a dice roll on every tap/tick.**
+  The old version rolled a 2% chance on *every single click* and every
+  1-second tick while a server was online, which meant frantic tapping (or
+  just idling) could trigger a burst of attacks or none for ages. It's now
+  a real timer: while a compatible server is online and the app is in the
+  foreground, the next hacked event is queued at a randomised delay that
+  averages out to **about 3 events per 10 minutes of active play**,
+  independent of how fast you're tapping.
+- **Smoother everywhere.** Modals, toasts, the hacked-event overlay, the
+  hack-battle banner, milestone bars, rank-ups, and every button now use a
+  consistent set of GPU-friendly transform/opacity transitions instead of
+  hard cuts, tuned to feel snappy at 60fps rather than heavy.
+- **Fewer localStorage writes.** Saves from ordinary taps/ticks are now
+  batched (~1.2s) instead of writing to disk on every single tap, which
+  keeps rapid tapping smooth on lower-end Android WebViews. Important
+  events (purchases, milestones, settings, backgrounding the app) still
+  save immediately so nothing is ever lost.
+- **A couple of dead stats got wired up properly:** Network Defense now
+  actually reduces clicks stolen during a hack battle (it was defined but
+  always returned 0 before), and PSU Boost now contributes to your visible
+  server power score instead of only nudging auto-click.
+
 ## What changed from the Kivy version
 
 - All game logic was ported 1:1 from `main.py`'s economy: clicks-per-tap,

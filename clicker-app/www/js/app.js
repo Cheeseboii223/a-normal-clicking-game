@@ -28,6 +28,13 @@ function el(tag, className, text) {
 
 function rand(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
+// Retriggers a CSS animation on an element by removing + re-adding a class.
+function bump(element, className) {
+  element.classList.remove(className);
+  void element.offsetWidth; // force reflow so the animation restarts
+  element.classList.add(className);
+}
+
 const SAVE_KEY = 'clicker_save_v1';
 
 /* =========================================================
@@ -69,6 +76,17 @@ function defaultState() {
 
 let S = defaultState();
 
+/* Saving is throttled: taps/ticks schedule a batched save instead of
+   hitting localStorage synchronously every time, which keeps rapid
+   tapping smooth. Important events (purchases, milestones, settings,
+   pausing/backgrounding) still save immediately so nothing is lost. */
+let saveScheduled = false;
+function scheduleSave() {
+  if (saveScheduled) return;
+  saveScheduled = true;
+  setTimeout(() => { saveScheduled = false; saveProgress(); }, 1200);
+}
+
 function saveProgress() {
   S.last_seen_time = Date.now() / 1000;
   const payload = { ...S, server_build: {} };
@@ -86,7 +104,7 @@ function loadProgress() {
     if (raw) data = JSON.parse(raw);
   } catch (e) { data = null; }
 
-  if (!data) { S = defaultState(); return; }
+  if (!data) { S = defaultState(); recomputeStats(); return; }
 
   const d = defaultState();
   for (const key of Object.keys(d)) {
@@ -103,6 +121,7 @@ function loadProgress() {
   }
   d.milestones_unlocked = (data.milestones_unlocked || []).filter((m) => MILESTONE_MESSAGES[m] !== undefined);
   S = d;
+  recomputeStats();
   applyOfflineGain();
   S.highest_click_count = Math.max(S.highest_click_count, S.click_count);
 }
@@ -147,6 +166,8 @@ function playUiSound(kind = 'tap') {
     upgrade: [[420, 60], [620, 40], [820, 50]],
     server: [[240, 80], [520, 60], [760, 70]],
     reset: [[180, 80], [120, 120]],
+    deny: [[220, 90]],
+    rank: [[520, 60], [700, 60], [900, 90]],
   };
   let delay = 0;
   for (const [freq, dur] of (tones[kind] || tones.tap)) {
@@ -196,13 +217,19 @@ function getRankMultiplier() { return 1.0 + getRankIndex() * 0.02; }
 
 /* =========================================================
    COMBO
+   RAM Boost is the sole upgrade that touches combo: it widens the
+   tap-timing window and raises the max combo cap. Nothing else
+   writes to combo state, so it can never be "overwritten" by a
+   different upgrade purchase.
    ========================================================= */
+function getComboWindowSeconds() { return 0.9 + S.ram_boost_level * 0.015; }
+function getComboCap() { return 5 + Math.floor(S.ram_boost_level / 3); }
 function getComboMultiplier() {
   const now = Date.now() / 1000;
-  if (now - S.last_tap_time < 0.9) S.combo_streak += 1; else S.combo_streak = 1;
+  if (now - S.last_tap_time < getComboWindowSeconds()) S.combo_streak += 1; else S.combo_streak = 1;
   S.last_tap_time = now;
   if (S.combo_streak > S.best_combo_streak) S.best_combo_streak = S.combo_streak;
-  return 1 + Math.min(5, S.combo_streak) * (0.15 + S.combo_boost_level * 0.05);
+  return 1 + Math.min(getComboCap(), S.combo_streak) * (0.15 + S.combo_boost_level * 0.05);
 }
 
 /* =========================================================
@@ -221,65 +248,131 @@ const getNetworkCost = () => Math.round(1700 * 2 ** S.network_level);
 const getCacheCost = () => Math.round(1650 * 2 ** S.cache_level);
 const getCoreCost = () => Math.round(2200 * 2 ** S.core_level);
 
+/* =========================================================
+   DERIVED PRODUCTION STATS
+   Every upgrade below owns exactly one effect. The only upgrade that
+   touches more than one stat is "Core Overclock", and it does so as a
+   clearly-labelled global percentage multiplier applied on top of
+   everything else - never by silently adding into another upgrade's
+   own number. This is what actually fixes the old bug where buying
+   one upgrade could make another upgrade's displayed effect appear to
+   "vanish": in the old build several upgrades quietly added into the
+   same shared counter, so the number shown next to one upgrade didn't
+   match what was actually being produced.
+   ========================================================= */
+function getClicksPerTap() {
+  const flat = 1 + S.upgrade_level;
+  const overclockMult = 1 + S.overclock_level * 0.03;
+  const coreMult = 1 + S.core_level * 0.01;
+  return flat * overclockMult * coreMult;
+}
+function getAutoClickRate() {
+  const flat = S.auto_click_level;
+  if (flat <= 0) return 0;
+  const coolingMult = 1 + S.cooling_level * 0.03;
+  const coreMult = 1 + S.core_level * 0.01;
+  return flat * coolingMult * coreMult;
+}
+function recomputeStats() {
+  S.clicks_per_tap = getClicksPerTap();
+  S.auto_click_rate = getAutoClickRate();
+}
+
 const UPGRADE_ROWS = [
-  { name: 'Clicks +1', levelKey: 'upgrade_level', cost: getClickUpgradeCost, kind: 'click' },
-  { name: 'Auto Click +1', levelKey: 'auto_click_level', cost: getAutoClickCost, kind: 'auto' },
-  { name: 'Mining Rig +1', levelKey: 'server_mining_level', cost: getServerMiningCost, kind: 'mining' },
-  { name: 'Mining Eff +1', levelKey: 'mining_efficiency', cost: getMiningEfficiencyCost, kind: 'efficiency' },
-  { name: 'Overclock +1', levelKey: 'overclock_level', cost: getOverclockCost, kind: 'overclock' },
-  { name: 'Cooling +1', levelKey: 'cooling_level', cost: getCoolingCost, kind: 'cooling' },
-  { name: 'PSU Boost +1', levelKey: 'psu_boost_level', cost: getPsuBoostCost, kind: 'psu' },
-  { name: 'RAM Boost +1', levelKey: 'ram_boost_level', cost: getRamBoostCost, kind: 'ram' },
-  { name: 'GPU Boost +1', levelKey: 'gpu_boost_level', cost: getGpuBoostCost, kind: 'gpu' },
-  { name: 'Network +1', levelKey: 'network_level', cost: getNetworkCost, kind: 'network' },
-  { name: 'Cache +1', levelKey: 'cache_level', cost: getCacheCost, kind: 'cache' },
-  { name: 'Core +1', levelKey: 'core_level', cost: getCoreCost, kind: 'core' },
+  {
+    kind: 'click', name: 'Click Power', levelKey: 'upgrade_level', cost: getClickUpgradeCost,
+    effect: () => `+1 click per tap  →  ${formatNumber(getClicksPerTap())}/tap now`,
+  },
+  {
+    kind: 'auto', name: 'Auto Clicker', levelKey: 'auto_click_level', cost: getAutoClickCost,
+    effect: () => `+1 auto-click/sec  →  ${formatNumber(getAutoClickRate())}/sec now`,
+  },
+  {
+    kind: 'overclock', name: 'Overclock', levelKey: 'overclock_level', cost: getOverclockCost,
+    effect: () => `+3% tap power  →  x${(1 + S.overclock_level * 0.03).toFixed(2)}`,
+  },
+  {
+    kind: 'cooling', name: 'Cooling', levelKey: 'cooling_level', cost: getCoolingCost,
+    effect: () => `+3% auto-click rate  →  x${(1 + S.cooling_level * 0.03).toFixed(2)}`,
+  },
+  {
+    kind: 'mining', name: 'Mining Rig', levelKey: 'server_mining_level', cost: getServerMiningCost,
+    effect: () => 'Raises server mining chance & payout floor',
+  },
+  {
+    kind: 'efficiency', name: 'Mining Efficiency', levelKey: 'mining_efficiency', cost: getMiningEfficiencyCost,
+    effect: () => 'Raises server mining chance & payout floor',
+  },
+  {
+    kind: 'psu', name: 'PSU Boost', levelKey: 'psu_boost_level', cost: getPsuBoostCost,
+    effect: () => `+15 server power score  →  helps builds run & mine more`,
+  },
+  {
+    kind: 'ram', name: 'RAM Boost', levelKey: 'ram_boost_level', cost: getRamBoostCost,
+    effect: () => `Widens combo window & raises combo cap to x${getComboCap()}`,
+  },
+  {
+    kind: 'gpu', name: 'GPU Boost', levelKey: 'gpu_boost_level', cost: getGpuBoostCost,
+    effect: () => '+18 mining power, +1 hack-battle attack',
+  },
+  {
+    kind: 'network', name: 'Network Defense', levelKey: 'network_level', cost: getNetworkCost,
+    effect: () => `Blocks ${S.network_level * 4} clicks stolen per hack, +1 attack`,
+  },
+  {
+    kind: 'cache', name: 'Cache', levelKey: 'cache_level', cost: getCacheCost,
+    effect: () => '+9 mining power  →  bigger mining payouts',
+  },
+  {
+    kind: 'core', name: 'Core Overclock', levelKey: 'core_level', cost: getCoreCost,
+    effect: () => `Global boost: +1% to ALL production  →  x${(1 + S.core_level * 0.01).toFixed(2)}`,
+  },
 ];
 
 function buyUpgrade(kind) {
   const map = {
-    click: () => { S.upgrade_level++; S.clicks_per_tap++; },
-    auto: () => { S.auto_click_level++; S.auto_click_rate++; },
+    click: () => { S.upgrade_level++; },
+    auto: () => { S.auto_click_level++; },
     mining: () => { S.server_mining_level++; },
     efficiency: () => { S.mining_efficiency++; },
-    overclock: () => { S.overclock_level++; S.clicks_per_tap++; },
+    overclock: () => { S.overclock_level++; },
     cooling: () => { S.cooling_level++; },
-    psu: () => { S.psu_boost_level++; S.auto_click_rate++; },
-    ram: () => { S.ram_boost_level++; S.clicks_per_tap++; },
-    gpu: () => { S.gpu_boost_level++; S.server_mining_level++; },
-    network: () => { S.network_level++; S.auto_click_rate++; },
-    cache: () => { S.cache_level++; S.mining_efficiency++; },
-    core: () => { S.core_level++; S.clicks_per_tap++; S.server_mining_level++; },
+    psu: () => { S.psu_boost_level++; },
+    ram: () => { S.ram_boost_level++; },
+    gpu: () => { S.gpu_boost_level++; },
+    network: () => { S.network_level++; },
+    cache: () => { S.cache_level++; },
+    core: () => { S.core_level++; },
   };
   const row = UPGRADE_ROWS.find((r) => r.kind === kind);
   const cost = row.cost();
   if (S.click_count < cost) return false;
   S.click_count -= cost;
   map[kind]();
+  recomputeStats();
   refreshClickLabel();
   saveProgress();
   return true;
 }
 
 /* =========================================================
-   HACK ATTACK / STEAL POWER (fidelity kept even though firewall
-   & auto-repair levels can never rise above 0 in the shipped game)
+   HACK ATTACK / STEAL POWER
    ========================================================= */
 function getHackAttackPower() {
-  let power = S.clicks_per_tap + S.overclock_level + S.ram_boost_level + S.gpu_boost_level +
-    S.core_level + S.psu_boost_level + S.network_level + S.cache_level +
-    S.server_mining_level + S.mining_efficiency + S.combo_boost_level;
+  let power = Math.max(1, Math.round(getClicksPerTap()));
+  power += S.gpu_boost_level + S.network_level + S.combo_boost_level;
   if (S.server_online && isServerBuildCompatible()) power += 2 + Math.trunc(getServerPowerScore() / 180);
+  power = Math.round(power * (1 + S.core_level * 0.01));
   return Math.max(1, power);
 }
-function getHackStealReduction() { return 0; }
+function getHackStealReduction() { return S.network_level * 4; }
 function getExtraClickGain() { return 0; }
 
 /* =========================================================
    SERVER BUILDER
    ========================================================= */
 function getServerPowerScore(build = S.server_build) {
-  let total = 0;
+  let total = S.psu_boost_level * 15;
   for (const cat of SERVER_CATEGORIES) {
     const part = build[cat];
     if (part) total += part.power || 0;
@@ -307,19 +400,23 @@ function getServerStatusText(build = S.server_build) {
   if (build.PSU.watts < build.CPU.tdp + build.GPU.power_draw + 120) return 'PSU too weak';
   return 'Build invalid';
 }
+/* Mining reward is fed only by upgrades whose job is mining: Mining
+   Rig, Mining Efficiency, GPU Boost and Cache, plus the server's own
+   power score (parts + PSU Boost). Core Overclock's global multiplier
+   is applied last, on top, same as everywhere else. */
 function getServerMiningReward() {
   if (!S.server_online) return 0;
   if (!isServerBuildCompatible() || SERVER_CATEGORIES.some((c) => !S.server_build[c])) return 0;
   let power = getServerPowerScore();
-  power += S.overclock_level * 15 + S.cooling_level * 10 + S.gpu_boost_level * 18 +
-    S.ram_boost_level * 12 + S.network_level * 8 + S.cache_level * 9 + S.core_level * 20;
+  power += S.gpu_boost_level * 18 + S.cache_level * 9;
   if (power <= 0) return 0;
   const roll = Math.random();
   const baseChance = Math.min(0.94, 0.18 + power / 1800 + S.server_mining_level * 0.08 + S.mining_efficiency * 0.06);
   if (roll > baseChance) return 0;
   const floor = 1 + S.server_mining_level + S.mining_efficiency;
   const ceiling = Math.max(2, Math.trunc(power / 22) + S.server_mining_level + S.mining_efficiency + S.gpu_boost_level);
-  return rand(floor, ceiling);
+  const reward = rand(floor, ceiling);
+  return Math.max(1, Math.round(reward * (1 + S.core_level * 0.01)));
 }
 
 /* =========================================================
@@ -351,10 +448,10 @@ function showToast(titleText, bodyText, colorClass) {
   toast.appendChild(title);
   toast.appendChild(body);
   toastRoot.appendChild(toast);
-  requestAnimationFrame(() => toast.classList.add('show'));
+  requestAnimationFrame(() => requestAnimationFrame(() => toast.classList.add('show')));
   setTimeout(() => {
     toast.classList.remove('show');
-    setTimeout(() => toast.remove(), 350);
+    setTimeout(() => toast.remove(), 450);
   }, 4000);
 }
 function showAchievement(milestone) {
@@ -371,10 +468,25 @@ const clickLabel = document.getElementById('click-label');
 const rankBadge = document.getElementById('rank-badge');
 const clickButton = document.getElementById('click-button');
 
-function refreshClickLabel() { clickLabel.textContent = `clicks : ${formatNumber(S.click_count)}`; }
+function refreshClickLabel() {
+  clickLabel.textContent = `clicks : ${formatNumber(S.click_count)}`;
+  bump(clickLabel, 'pulse');
+  if (activeModalRefresh) activeModalRefresh();
+}
+
+let lastRankIndex = -1;
 function updateRankProgress() {
   if (S.click_count > S.highest_click_count) S.highest_click_count = S.click_count;
+  const idx = getRankIndex();
   rankBadge.textContent = getRankName();
+  if (lastRankIndex === -1) {
+    lastRankIndex = idx;
+  } else if (idx > lastRankIndex) {
+    lastRankIndex = idx;
+    bump(rankBadge, 'rank-up');
+    playUiSound('rank');
+    showToast('RANK UP', `You are now ${getRankName()}`, '#ebc759');
+  }
 }
 
 function showClickFeedback(amount) {
@@ -389,18 +501,15 @@ function showClickFeedback(amount) {
   document.body.appendChild(popup);
   requestAnimationFrame(() => {
     popup.style.opacity = '1';
-    popup.style.transform = 'translateY(-90px)';
+    popup.style.transform = 'translateY(-90px) scale(1.05)';
   });
-  setTimeout(() => { popup.style.opacity = '0'; }, 380);
-  setTimeout(() => popup.remove(), 780);
+  setTimeout(() => { popup.style.opacity = '0'; }, 420);
+  setTimeout(() => popup.remove(), 820);
 }
-
-const HACK_EVENT_CHANCE_PER_CLICK = 0.02;
-const HACK_EVENT_CHANCE_PER_TICK = 0.02;
 
 function onClick() {
   primeAudioOnce();
-  const comboMult = S.combo_boost_level > 0 || true ? getComboMultiplier() : 1.0; // combo always active on tap
+  const comboMult = getComboMultiplier();
   const tapGain = Math.trunc(S.clicks_per_tap * comboMult * getRankMultiplier()) + getExtraClickGain();
   S.click_count += tapGain;
   refreshClickLabel();
@@ -408,8 +517,7 @@ function onClick() {
   checkMilestones();
   showClickFeedback(tapGain);
   playUiSound('tap');
-  if (Math.random() < HACK_EVENT_CHANCE_PER_CLICK) triggerHackedEvent();
-  saveProgress();
+  scheduleSave();
 
   clickButton.classList.remove('pop');
   void clickButton.offsetWidth;
@@ -420,23 +528,22 @@ clickButton.addEventListener('click', onClick);
 function addAutoClicks() {
   S.total_playtime_seconds += 1;
   const rankMult = getRankMultiplier();
+  let changed = false;
   if (S.auto_click_rate > 0) {
     S.click_count += Math.trunc((S.auto_click_rate + getExtraClickGain()) * rankMult);
-    refreshClickLabel();
-    updateRankProgress();
-    checkMilestones();
+    changed = true;
   }
   const miningGain = getServerMiningReward();
   if (miningGain > 0) {
     S.click_count += Math.trunc(miningGain * rankMult);
+    changed = true;
+  }
+  if (changed) {
     refreshClickLabel();
     updateRankProgress();
     checkMilestones();
+    scheduleSave();
   }
-  if (S.server_online && isServerBuildCompatible() && Math.random() < HACK_EVENT_CHANCE_PER_TICK) {
-    triggerHackedEvent();
-  }
-  saveProgress();
 }
 
 let audioPrimed = false;
@@ -448,6 +555,14 @@ function primeAudioOnce() {
 
 /* =========================================================
    HACKED EVENT + HACK BATTLE
+   Hacked events used to be a small dice-roll on every single tap and
+   every 1-second tick, which meant frantic tapping (or an idle,
+   ticking server) could trigger a flood of them in quick succession,
+   or none for ages. That's replaced with a real scheduler: while a
+   compatible server is online and the game is in the foreground, the
+   game queues the next hacked event at a randomised time that
+   averages out to about 3 events per 10 minutes of active play -
+   never tied to how fast you're tapping.
    ========================================================= */
 const hackedOverlay = document.getElementById('hacked-overlay');
 const hackedText = document.getElementById('hacked-text');
@@ -462,6 +577,24 @@ let hackBattleTargetVal = 0;
 let hackBattleProgress = 0;
 let hackStealInterval = null;
 
+const HACK_EVENT_AVG_INTERVAL_MS = (10 * 60 * 1000) / 3; // ~3 events per 10 minutes on average
+let hackEventTimer = null;
+
+function clearHackEventTimer() {
+  if (hackEventTimer) { clearTimeout(hackEventTimer); hackEventTimer = null; }
+}
+function scheduleNextHackEvent() {
+  clearHackEventTimer();
+  if (!S.server_online || !isServerBuildCompatible() || document.hidden) return;
+  const jitter = 0.6 + Math.random() * 0.8; // 0.6x - 1.4x of the average, so it's not perfectly metronomic
+  const delay = HACK_EVENT_AVG_INTERVAL_MS * jitter;
+  hackEventTimer = setTimeout(() => {
+    hackEventTimer = null;
+    triggerHackedEvent();
+    scheduleNextHackEvent();
+  }, delay);
+}
+
 function triggerHackedEvent() {
   if (!S.server_online || !isServerBuildCompatible()) return;
   if (hackedEventActive || hackBattleActive) return;
@@ -470,7 +603,7 @@ function triggerHackedEvent() {
 
   hackedText.textContent = '';
   hackedOverlay.classList.remove('hidden');
-  requestAnimationFrame(() => hackedOverlay.classList.add('show'));
+  requestAnimationFrame(() => requestAnimationFrame(() => hackedOverlay.classList.add('show')));
 
   const message = 'HACKED';
   const glitchChars = ['#', '@', 'H', 'A', 'C', 'K', 'E', 'D', '0', '1'];
@@ -511,7 +644,7 @@ function startHackBattle() {
   battleTarget.innerHTML = `CLICK ${hackBattleTargetVal} MORE<br/>TO FIGHT BACK`;
   battleStatus.textContent = 'Hackers are stealing your clicks...';
   battleOverlay.classList.remove('hidden');
-  requestAnimationFrame(() => battleOverlay.classList.add('show'));
+  requestAnimationFrame(() => requestAnimationFrame(() => battleOverlay.classList.add('show')));
 
   if (hackStealInterval) clearInterval(hackStealInterval);
   hackStealInterval = setInterval(() => {
@@ -519,7 +652,7 @@ function startHackBattle() {
     const stolen = Math.max(0, rand(25, 150) - getHackStealReduction());
     S.click_count = Math.max(0, S.click_count - stolen);
     refreshClickLabel();
-    battleStatus.textContent = `Hackers stole ${stolen} clicks!`;
+    battleStatus.textContent = stolen > 0 ? `Hackers stole ${stolen} clicks!` : 'Network Defense blocked the theft!';
     saveProgress();
   }, 1000);
 }
@@ -531,6 +664,7 @@ function attackHacker() {
   const remaining = Math.max(hackBattleTargetVal - hackBattleProgress, 0);
   battleTarget.innerHTML = `CLICK ${remaining} MORE<br/>TO FIGHT BACK`;
   battleStatus.textContent = `Fighting back... ${hackBattleProgress}/${hackBattleTargetVal} (x${attackPower})`;
+  bump(battleTapTarget.parentElement.querySelector('.battle-banner'), 'battle-hit');
 
   if (hackBattleProgress >= hackBattleTargetVal) {
     hackBattleActive = false;
@@ -556,13 +690,26 @@ const modalRoot = document.getElementById('modal-root');
 const modalBackdrop = document.getElementById('modal-backdrop');
 const modalBox = document.getElementById('modal-box');
 
+// When a modal exposes a live-refresh hook (e.g. Upgrades), it's
+// stored here so background ticks/taps can keep it in sync without
+// forcing the modal to close and reopen.
+let activeModalRefresh = null;
+
 function openModal(buildFn, { full = false } = {}) {
   modalBox.innerHTML = '';
   modalBox.classList.toggle('full', full);
   buildFn(modalBox);
   modalRoot.classList.remove('hidden');
+  requestAnimationFrame(() => requestAnimationFrame(() => modalRoot.classList.add('show')));
 }
-function closeModal() { modalRoot.classList.add('hidden'); modalBox.innerHTML = ''; }
+function closeModal() {
+  modalRoot.classList.remove('show');
+  activeModalRefresh = null;
+  setTimeout(() => {
+    modalRoot.classList.add('hidden');
+    modalBox.innerHTML = '';
+  }, 260);
+}
 modalBackdrop.addEventListener('click', closeModal);
 
 function makeMenuButton(text, onClick, danger = false) {
@@ -618,6 +765,9 @@ function resetGameSave() {
   const keepSettings = { sound_enabled: S.sound_enabled, music_enabled: S.music_enabled };
   S = defaultState();
   Object.assign(S, keepSettings);
+  recomputeStats();
+  lastRankIndex = getRankIndex();
+  clearHackEventTimer();
   refreshClickLabel();
   updateRankProgress();
   playUiSound('reset');
@@ -632,10 +782,12 @@ function showGuide() {
     text.innerHTML =
       '<b>The basics</b>\n' +
       'Tap the button to earn clicks. Spend clicks on UPGRADES to raise how much each tap and auto-click earns.\n\n' +
+      '<b>Every upgrade does its own thing</b>\n' +
+      'Each upgrade in the shop boosts its own stat and only that stat, shown live under its name - buying one never eats into another. Core Overclock is the one exception: it openly boosts everything a little, as a shared global multiplier.\n\n' +
       '<b>Rank</b>\n' +
       'Your rank (top of screen) rises with your all-time clicks and never goes down, even after you spend. Higher rank = a permanent bonus to every click. Tap it to see progress.\n\n' +
       "<b>Server & hacks - read this one</b>\n" +
-      "Building and booting a server (SERVER tab) boosts your income, but once it's online and compatible it can also get targeted by hacked events and hack battles that steal your clicks. <b>Don't rush a weak, early server online</b> - build up some upgrades first.\n\n" +
+      "Building and booting a server (SERVER tab) boosts your income, but once it's online and compatible, hackers will strike roughly 3 times every 10 minutes you're actively playing - it's on a timer, not random bad luck from clicking. Network Defense upgrades soften the damage and boost your counterattack.\n\n" +
       '<b>Other tips</b>\n' +
       '- MILESTONE shows every click goal and its message.\n' +
       "- Closing the app is safe - you'll get an offline bonus based on time away when you come back.";
@@ -690,11 +842,12 @@ function showMilestones() {
       const done = S.click_count >= m;
       const pct = done ? 100 : Math.min((S.click_count / m) * 100, 100);
       const fill = el('div', `ms-bar-fill${done ? ' done' : ''}`);
-      fill.style.width = `${pct}%`;
       barWrap.appendChild(fill);
       row.appendChild(barWrap);
       row.appendChild(el('div', 'ms-percent', `${Math.round(pct)}%`));
       scroll.appendChild(row);
+      // set width after insertion so the fill animates in smoothly
+      requestAnimationFrame(() => { fill.style.width = `${pct}%`; });
     }
     box.appendChild(scroll);
     box.appendChild(makeCloseButton());
@@ -706,25 +859,76 @@ document.getElementById('milestone-btn').addEventListener('click', showMilestone
 function showUpgrades() {
   openModal((box) => {
     box.appendChild(el('div', 'modal-title', 'UPGRADES'));
+    const summary = el('div', 'upgrade-summary');
+    box.appendChild(summary);
+    box.appendChild(el('div', 'modal-divider'));
     const scroll = el('div', 'modal-scroll');
-    for (const upgrade of UPGRADE_ROWS) {
-      const level = S[upgrade.levelKey];
-      const cost = upgrade.cost();
-      const row = el('div', 'up-row');
-      const info = el('div', 'up-info');
-      info.appendChild(el('div', 'up-name', upgrade.name));
-      info.appendChild(el('div', 'up-cost', `Lvl ${level} • ${formatNumber(cost)} clicks`));
-      row.appendChild(info);
-      const buyBtn = el('button', 'up-buy', 'BUY');
-      if (S.click_count < cost) buyBtn.disabled = true;
-      buyBtn.addEventListener('click', () => {
-        if (buyUpgrade(upgrade.kind)) { playUiSound('upgrade'); closeModal(); }
-      });
-      row.appendChild(buyBtn);
-      scroll.appendChild(row);
-    }
     box.appendChild(scroll);
     box.appendChild(makeCloseButton());
+
+    const rowRefreshers = [];
+
+    function renderSummary() {
+      summary.innerHTML = '';
+      const stats = [
+        ['Click Power', `${formatNumber(getClicksPerTap())}/tap`],
+        ['Auto Clicker', `${formatNumber(getAutoClickRate())}/sec`],
+        ['Global Boost', `x${(1 + S.core_level * 0.01).toFixed(2)}`],
+      ];
+      for (const [label, value] of stats) {
+        const item = el('div', 'summary-item');
+        item.appendChild(el('div', 'summary-label', label));
+        item.appendChild(el('div', 'summary-value', value));
+        summary.appendChild(item);
+      }
+    }
+
+    function renderRow(upgrade) {
+      const row = el('div', 'up-row');
+      const info = el('div', 'up-info');
+      const nameEl = el('div', 'up-name', upgrade.name);
+      const effectEl = el('div', 'up-effect');
+      const costEl = el('div', 'up-cost');
+      info.appendChild(nameEl);
+      info.appendChild(effectEl);
+      info.appendChild(costEl);
+      row.appendChild(info);
+      const buyBtn = el('button', 'up-buy', 'BUY');
+      row.appendChild(buyBtn);
+      scroll.appendChild(row);
+
+      function refreshRow() {
+        const level = S[upgrade.levelKey];
+        const cost = upgrade.cost();
+        costEl.textContent = `Lvl ${level} • ${formatNumber(cost)} clicks`;
+        effectEl.textContent = upgrade.effect();
+        buyBtn.disabled = S.click_count < cost;
+      }
+
+      buyBtn.addEventListener('click', () => {
+        const ok = buyUpgrade(upgrade.kind);
+        if (ok) {
+          bump(row, 'flash-buy');
+          playUiSound('upgrade');
+          renderSummary();
+          for (const refresh of rowRefreshers) refresh();
+        } else {
+          bump(row, 'flash-deny');
+          playUiSound('deny');
+        }
+      });
+
+      refreshRow();
+      rowRefreshers.push(refreshRow);
+    }
+
+    for (const upgrade of UPGRADE_ROWS) renderRow(upgrade);
+    renderSummary();
+
+    activeModalRefresh = () => {
+      renderSummary();
+      for (const refresh of rowRefreshers) refresh();
+    };
   });
 }
 document.getElementById('upgrades-btn').addEventListener('click', showUpgrades);
@@ -751,8 +955,10 @@ function showServerBuilder() {
       if (!isServerBuildCompatible()) return;
       S.server_online = !S.server_online;
       playUiSound('server');
+      if (S.server_online) scheduleNextHackEvent(); else clearHackEventTimer();
       saveProgress();
       refreshBootBtn();
+      bump(bootBtn, 'boot-flash');
     });
     refreshBootBtn();
     box.appendChild(bootBtn);
@@ -790,6 +996,8 @@ function showServerBuilder() {
         row.addEventListener('click', () => {
           if (S.click_count < part.cost) {
             status.textContent = `Need ${formatNumber(part.cost - S.click_count)} more clicks`;
+            bump(row, 'flash-deny');
+            playUiSound('deny');
             return;
           }
           S.click_count -= part.cost;
@@ -870,11 +1078,15 @@ function runIntro() {
   });
 
   setTimeout(() => {
-    introScreen.classList.add('hidden');
-    gameScreen.classList.remove('hidden');
-    if (S.offline_bonus_total > 0) {
-      setTimeout(() => showWelcomeBack(S.offline_bonus_total), 500);
-    }
+    introScreen.classList.add('fade-out');
+    setTimeout(() => {
+      introScreen.classList.add('hidden');
+      gameScreen.classList.remove('hidden');
+      requestAnimationFrame(() => gameScreen.classList.add('show'));
+      if (S.offline_bonus_total > 0) {
+        setTimeout(() => showWelcomeBack(S.offline_bonus_total), 500);
+      }
+    }, 400);
   }, 1900);
 }
 
@@ -883,14 +1095,30 @@ function runIntro() {
    ========================================================= */
 function boot() {
   loadProgress();
+  lastRankIndex = getRankIndex();
   refreshClickLabel();
   updateRankProgress();
   setInterval(addAutoClicks, 1000);
+  scheduleNextHackEvent();
   runIntro();
 
   // Any first tap anywhere primes the audio context / music (mobile
   // browsers/webviews block autoplay until a user gesture happens).
   document.body.addEventListener('pointerdown', primeAudioOnce, { once: true });
+
+  // Pause the hack-event scheduler while backgrounded and resume it
+  // (with a fresh randomised delay) when the app comes back to the
+  // foreground; also flush any pending throttled save immediately so
+  // backgrounding/closing never loses progress.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      clearHackEventTimer();
+      saveProgress();
+    } else {
+      scheduleNextHackEvent();
+    }
+  });
+  window.addEventListener('pagehide', saveProgress);
 }
 
 document.addEventListener('DOMContentLoaded', boot);
